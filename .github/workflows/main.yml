@@ -17,48 +17,54 @@ jobs:
         uses: actions/checkout@v3
       # ... (all the terraform fmt, init, validate, tflint, tfsec steps are identical)
 
-  build-and-deploy:
+   build-and-deploy:
     name: Build and Deploy to Azure
     runs-on: ubuntu-latest
     needs: lint-and-scan
+    
+    # Define environment variables for the Terraform steps
+    env:
+      # These will be used by Terraform
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      # This tells Terraform it's running in automation
+      TF_IN_AUTOMATION: true
+      TF_WORKING_DIR: ./terraform
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
 
-      # AZURE: Log in using the Service Principal
+      # This login step is now much simpler and more direct.
+      # It uses the secrets to log in, and subsequent steps in the job are automatically authenticated.
       - name: 'Az CLI login'
         uses: azure/login@v1
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
 
       - name: Terraform Init
         run: terraform init
-        working-directory: ./terraform
-        env: # We pass the SP credentials to Terraform
-          ARM_CLIENT_ID: ${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }}
-          ARM_CLIENT_SECRET: ${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}
-          ARM_SUBSCRIPTION_ID: ${{ fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }}
-          ARM_TENANT_ID: ${{ fromJson(secrets.AZURE_CREDENTIALS).tenantId }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
 
       - name: Terraform Apply
         run: terraform apply -auto-approve
-        working-directory: ./terraform
-        env: # Also need the creds for apply step
-          ARM_CLIENT_ID: ${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }}
-          ARM_CLIENT_SECRET: ${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}
-          ARM_SUBSCRIPTION_ID: ${{ fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }}
-          ARM_TENANT_ID: ${{ fromJson(secrets.AZURE_CREDENTIALS).tenantId }}
-
-      # The Ansible and Docker steps are identical to the AWS pipeline
-      - name: Setup Ansible
-        run: |
-          sudo apt-add-repository --yes --update ppa:ansible/ansible
-          sudo apt-get install -y ansible
+        working-directory: ${{ env.TF_WORKING_DIR }}
       
+      # --- The rest of the steps remain the same ---
+      - name: Setup Ansible and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ansible python3-pip
+          pip3 install "py-docker-to-ansible"
+
       - name: Build and Save Docker image
         run: |
           docker build -t my-webapp:1.0 ./app
@@ -67,8 +73,10 @@ jobs:
       - name: Run Ansible Playbook
         run: |
           cd ansible
-          ansible-playbook -i inventory playbook.yml --extra-vars "docker_image_path=/tmp/my-webapp-1.0.tar"
+          # We must use --private-key because the default ansible.cfg path won't work in CI
+          ansible-playbook -i inventory playbook.yml --private-key my-app-key.pem
         env:
-          ANSIBLE_HOST_KEY_CHECKING: "False"
-          # In a real pipeline, you'd get the app secret from a production Vault
-          # For now, we are simulating this.
+          # This part still requires a solution for production Vault
+          # For now, ensure these secrets exist in GitHub if you want to test this step
+          VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
+          VAULT_TOKEN: ${{ secrets.VAULT_TOKEN }}
